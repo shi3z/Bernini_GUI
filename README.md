@@ -14,6 +14,37 @@
 
 </div>
 
+## 🖥️ React WebUI (Quick Start)
+
+A React-based WebUI with job queue management is available in the `webui/` directory.
+
+**Features:**
+- Real-time job queue with WebSocket updates
+- Support for all task types (t2v, t2i, i2i, v2v, r2v, rv2v)
+- Prompt enhancement via local ollama
+- Auto-cleanup of uploaded assets after generation
+
+**Quick Start:**
+
+```bash
+# Terminal 1: Start backend
+cd webui/backend
+pip install fastapi uvicorn httpx websockets
+python server.py
+
+# Terminal 2: Start frontend
+cd webui/frontend
+npm install
+npm run dev -- --host 0.0.0.0
+```
+
+Access the UI at `http://localhost:5173`. The backend runs on port 8000.
+
+**Note for Blackwell GPUs (sm_120):** Install PyTorch nightly with CUDA 13.0:
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu130 --force-reinstall
+```
+
 ## 🎉 News
 
 - **[2026-06-01]** We open-sourced the inference code and model weights of the Bernini Renderer (**Bernini-R**).
@@ -229,41 +260,6 @@ torchrun --nproc-per-node 8 gradio_demo.py --ulysses 8 \
 Add `--use_pe` (and `export OPENAI_API_KEY=...` / `BERNINI_PE_API_KEY=...`) to
 enable GPT prompt enhancement; the in-UI checkbox is a per-request switch on
 top of this flag.
-
-### React WebUI
-
-A React-based WebUI with job queue management is available in the `webui/` directory.
-
-**Features:**
-- Real-time job queue with WebSocket updates
-- Support for all task types (t2v, t2i, i2i, v2v, r2v, rv2v)
-- Prompt enhancement via local ollama
-- Auto-cleanup of uploaded assets after generation
-
-**Requirements:**
-- Node.js 18+
-- Local ollama instance (optional, for prompt enhancement)
-
-**Quick Start:**
-
-```bash
-# Terminal 1: Start backend
-cd webui/backend
-pip install fastapi uvicorn httpx websockets
-python server.py
-
-# Terminal 2: Start frontend
-cd webui/frontend
-npm install
-npm run dev -- --host 0.0.0.0
-```
-
-Access the UI at `http://localhost:5173`. The backend runs on port 8000.
-
-**Note for Blackwell GPUs (sm_120):** Install PyTorch nightly with CUDA 13.0:
-```bash
-pip install torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu130 --force-reinstall
-```
 
 ## 📑 Citation
 
