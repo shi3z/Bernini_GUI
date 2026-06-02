@@ -22,3 +22,7 @@ results/
 *.ckpt
 
 .DS_Store
+
+# WebUI
+node_modules/
+webui/frontend/dist/
