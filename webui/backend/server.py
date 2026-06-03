@@ -225,6 +225,17 @@ async def load_pipeline():
         use_src_id_rotary_emb=True,
     )
 
+    # Optional torch.compile of the two DiT experts (BERNINI_COMPILE=1). Speeds
+    # up steady-state denoising ~1.3x; first job of each new frame/resolution
+    # pays a one-time (~minute) compile. FlashAttention-2 is picked up
+    # automatically when installed (see bernini/attention.py).
+    if os.environ.get("BERNINI_COMPILE") == "1":
+        dd = PIPELINE.model.diff_dec
+        dd.transformer = torch.compile(dd.transformer)
+        dd.transformer_2 = torch.compile(dd.transformer_2)
+        from bernini.attention import get_attention_backend
+        print(f"torch.compile enabled (attention backend: {get_attention_backend()})")
+
 
 async def run_inference(job: Job) -> str:
     from bernini.cli import DEFAULT_NEG_PROMPT

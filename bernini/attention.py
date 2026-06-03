@@ -24,6 +24,8 @@ All backends share the same varlen contract: ``q``/``k``/``v`` are packed as
 offsets into ``total_tokens``.
 """
 
+import os
+
 import torch
 import torch.nn.functional as F
 
@@ -34,6 +36,17 @@ _flash_varlen = None
 def _select_backend():
     global _BACKEND, _flash_varlen
     if _BACKEND is not None:
+        return
+    # Optional override (e.g. BERNINI_ATTN_BACKEND=sdpa to force the PyTorch path,
+    # or =fa2 to require FlashAttention-2). Defaults to auto-detect.
+    forced = os.environ.get("BERNINI_ATTN_BACKEND", "").lower()
+    if forced == "sdpa":
+        _BACKEND = "sdpa"
+        return
+    if forced in ("fa2", "fa3"):
+        mod = "flash_attn_interface" if forced == "fa3" else "flash_attn"
+        _flash_varlen = __import__(mod, fromlist=["flash_attn_varlen_func"]).flash_attn_varlen_func
+        _BACKEND = forced
         return
     try:
         from flash_attn_interface import flash_attn_varlen_func  # FA3
