@@ -29,6 +29,7 @@ const TASK_TYPES = [
 ]
 
 const API_BASE = `http://${window.location.hostname}:8000`
+const randomSeed = () => Math.floor(Math.random() * 1000000)
 
 interface ImageSlot {
   file: File | null
@@ -41,7 +42,7 @@ function App() {
   const [prompt, setPrompt] = useState('')
   const [numFrames, setNumFrames] = useState(81)
   const [numSteps, setNumSteps] = useState(40)
-  const [seed, setSeed] = useState(() => Math.floor(Math.random() * 1000000))
+  const [seed, setSeed] = useState(randomSeed)
   const [video, setVideo] = useState<File | null>(null)
   const [videoPreview, setVideoPreview] = useState<string | null>(null)
   const [imageSlots, setImageSlots] = useState<ImageSlot[]>([
@@ -50,6 +51,9 @@ function App() {
   ])
   const [connected, setConnected] = useState(false)
   const [enhancing, setEnhancing] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
+  const [dragVideo, setDragVideo] = useState(false)
+  const [dragImage, setDragImage] = useState<number | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
 
   useEffect(() => {
@@ -88,37 +92,23 @@ function App() {
     } catch (e) { console.error(e) }
   }
 
-  const handleVideoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0] || null
+  const setVideoFile = (file: File | null) => {
     setVideo(file)
-    if (file) {
-      setVideoPreview(URL.createObjectURL(file))
-    } else {
-      setVideoPreview(null)
-    }
+    setVideoPreview(file ? URL.createObjectURL(file) : null)
   }
 
-  const handleImageChange = (index: number, e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0] || null
-    const newSlots = [...imageSlots]
-    if (file) {
-      newSlots[index] = { file, preview: URL.createObjectURL(file) }
-    } else {
-      newSlots[index] = { file: null, preview: null }
-    }
-    setImageSlots(newSlots)
+  const setImageFile = (index: number, file: File | null) => {
+    setImageSlots(prev => {
+      const next = [...prev]
+      next[index] = file
+        ? { file, preview: URL.createObjectURL(file) }
+        : { file: null, preview: null }
+      return next
+    })
   }
 
-  const removeImage = (index: number) => {
-    const newSlots = [...imageSlots]
-    newSlots[index] = { file: null, preview: null }
-    setImageSlots(newSlots)
-  }
-
-  const removeVideo = () => {
-    setVideo(null)
-    setVideoPreview(null)
-  }
+  const removeImage = (index: number) => setImageFile(index, null)
+  const removeVideo = () => setVideoFile(null)
 
   const submitJob = async () => {
     if (!prompt.trim()) return alert('Enter a prompt')
@@ -129,19 +119,16 @@ function App() {
     formData.append('num_inference_steps', numSteps.toString())
     formData.append('seed', seed.toString())
     if (video) formData.append('video', video)
+    imageSlots.forEach(slot => { if (slot.file) formData.append('images', slot.file) })
 
-    imageSlots.forEach(slot => {
-      if (slot.file) formData.append('images', slot.file)
-    })
-
+    setSubmitting(true)
     try {
       await fetch(`${API_BASE}/api/jobs`, { method: 'POST', body: formData })
-      setPrompt('')
-      setVideo(null)
-      setVideoPreview(null)
-      setImageSlots([{ file: null, preview: null }, { file: null, preview: null }])
-      setSeed(Math.floor(Math.random() * 1000000))
+      // Keep prompt and reference images so the next request can reuse them;
+      // only roll a fresh seed so repeated submits don't repeat the same output.
+      setSeed(randomSeed())
     } catch (e) { alert('Failed to submit') }
+    finally { setSubmitting(false) }
   }
 
   const cancelJob = async (id: string) => {
@@ -174,6 +161,18 @@ function App() {
   const statusColor: Record<string, string> = {
     pending: '#f59e0b', running: '#3b82f6', completed: '#10b981',
     failed: '#ef4444', cancelled: '#6b7280'
+  }
+
+  // ---- drag & drop helpers ----
+  const onVideoDrop = (e: React.DragEvent) => {
+    e.preventDefault(); setDragVideo(false)
+    const f = e.dataTransfer.files?.[0]
+    if (f && f.type.startsWith('video/')) setVideoFile(f)
+  }
+  const onImageDrop = (index: number) => (e: React.DragEvent) => {
+    e.preventDefault(); setDragImage(null)
+    const f = e.dataTransfer.files?.[0]
+    if (f && f.type.startsWith('image/')) setImageFile(index, f)
   }
 
   return (
@@ -218,9 +217,15 @@ function App() {
                     <span className="media-label">Source Video</span>
                   </div>
                 ) : (
-                  <label className="upload-box">
-                    <input type="file" accept="video/*" onChange={handleVideoChange} hidden />
+                  <label
+                    className={`upload-box${dragVideo ? ' dragover' : ''}`}
+                    onDragOver={e => { e.preventDefault(); setDragVideo(true) }}
+                    onDragLeave={() => setDragVideo(false)}
+                    onDrop={onVideoDrop}
+                  >
+                    <input type="file" accept="video/*" onChange={e => setVideoFile(e.target.files?.[0] || null)} hidden />
                     <span>+ Upload Video</span>
+                    <span className="drop-hint">またはドラッグ&ドロップ</span>
                   </label>
                 )}
               </div>
@@ -241,10 +246,16 @@ function App() {
                         <span className="media-label">Image {i + 1}</span>
                       </div>
                     ) : (
-                      <label className="upload-box">
-                        <input type="file" accept="image/*" onChange={(e) => handleImageChange(i, e)} hidden />
+                      <label
+                        className={`upload-box${dragImage === i ? ' dragover' : ''}`}
+                        onDragOver={e => { e.preventDefault(); setDragImage(i) }}
+                        onDragLeave={() => setDragImage(null)}
+                        onDrop={onImageDrop(i)}
+                      >
+                        <input type="file" accept="image/*" onChange={(e) => setImageFile(i, e.target.files?.[0] || null)} hidden />
                         <span className="slot-number">Image {i + 1}</span>
                         <span>+ Upload</span>
+                        <span className="drop-hint">D&D可</span>
                       </label>
                     )}
                   </div>
@@ -256,16 +267,26 @@ function App() {
           <div className="form-row">
             <div className="form-group"><label>Frames</label><input type="number" value={numFrames} onChange={e => setNumFrames(+e.target.value)} /></div>
             <div className="form-group"><label>Steps</label><input type="number" value={numSteps} onChange={e => setNumSteps(+e.target.value)} /></div>
-            <div className="form-group"><label>Seed</label><input type="number" value={seed} onChange={e => setSeed(+e.target.value)} /></div>
+            <div className="form-group">
+              <label>Seed</label>
+              <div className="seed-row">
+                <input type="number" value={seed} onChange={e => setSeed(+e.target.value)} />
+                <button className="dice-btn" title="ランダムシード" onClick={() => setSeed(randomSeed())}>🎲</button>
+              </div>
+            </div>
           </div>
 
-          <button className="submit-btn" onClick={submitJob}>Submit Job</button>
+          <button className="submit-btn" onClick={submitJob} disabled={submitting}>
+            {submitting ? 'Submitting...' : 'Submit Job'}
+          </button>
         </div>
 
         <div className="panel jobs">
           <h2>Jobs ({jobs.filter(j => j.status === 'pending').length} pending, {jobs.filter(j => j.status === 'running').length} running)</h2>
           <div className="jobs-list">
-            {jobs.map(job => (
+            {jobs.map(job => {
+              const isImg = job.task_type.includes('2i')
+              return (
               <div key={job.id} className={`job-card ${job.status}`}>
                 <div className="job-header">
                   <span className="job-id">#{job.id}</span>
@@ -274,16 +295,28 @@ function App() {
                 </div>
                 <p className="job-prompt">{job.prompt.slice(0, 120)}{job.prompt.length > 120 ? '...' : ''}</p>
 
+                {/* input thumbnails (queued reference images / source video) */}
+                {(job.image_paths?.length > 0 || job.video_path) && (
+                  <div className="job-inputs">
+                    {job.video_path && (
+                      <video className="thumb" src={`${API_BASE}/api/jobs/${job.id}/video`} muted />
+                    )}
+                    {job.image_paths?.map((_, i) => (
+                      <img key={i} className="thumb" src={`${API_BASE}/api/jobs/${job.id}/input/${i}`} alt={`in${i}`} />
+                    ))}
+                  </div>
+                )}
+
                 {job.status === 'running' && (
                   <div className="progress">
-                    <div className="progress-bar" style={{ width: `${job.progress}%` }} />
-                    <span>{job.current_step}/{job.total_steps} ({job.progress.toFixed(1)}%)</span>
+                    <div className="progress-bar" style={{ width: `${job.progress || 0}%` }} />
+                    <span>{job.current_step}/{job.total_steps} ({(job.progress || 0).toFixed(1)}%)</span>
                   </div>
                 )}
 
                 {job.status === 'completed' && job.output_path && (
                   <div className="output">
-                    {job.task_type.includes('2i') ? (
+                    {isImg ? (
                       <img src={`${API_BASE}/api/jobs/${job.id}/output`} alt="output" />
                     ) : (
                       <video src={`${API_BASE}/api/jobs/${job.id}/output`} controls loop />
@@ -294,7 +327,7 @@ function App() {
                 {job.status === 'failed' && <p className="error">{job.error}</p>}
                 {job.status === 'pending' && <button className="cancel-btn" onClick={() => cancelJob(job.id)}>Cancel</button>}
               </div>
-            ))}
+            )})}
           </div>
         </div>
       </div>

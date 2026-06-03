@@ -26,3 +26,13 @@ results/
 # WebUI
 node_modules/
 webui/frontend/dist/
+
+# model weights (downloaded, not tracked)
+/Bernini/
+/Wan2.2-T2V-A14B-Diffusers/
+webui_data/
+hf_cache/
+uv_cache/
+pip_cache/
+tmp/
+.venv/

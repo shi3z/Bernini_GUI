@@ -3,6 +3,7 @@ Bernini WebUI Backend - FastAPI server with job queue management.
 """
 
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -38,9 +39,17 @@ JOBS: dict[str, "Job"] = {}
 JOB_QUEUE: asyncio.Queue = None
 PIPELINE = None
 DEVICE = None
-OUTPUT_DIR = None
 CURRENT_JOB_ID = None
 WEBSOCKET_CONNECTIONS: dict[str, WebSocket] = {}
+MAIN_LOOP: Optional[asyncio.AbstractEventLoop] = None
+
+# Persistent storage so jobs / inputs / outputs survive a backend restart and
+# are reachable from any client (cross-machine restore). Lives on the big
+# volume; override with BERNINI_WEBUI_DATA.
+DATA_DIR = os.environ.get("BERNINI_WEBUI_DATA", str(PROJECT_ROOT / "webui_data"))
+OUTPUT_DIR = os.path.join(DATA_DIR, "outputs")
+INPUT_DIR = os.path.join(DATA_DIR, "inputs")
+JOBS_FILE = os.path.join(DATA_DIR, "jobs.json")
 
 
 class JobStatus(str, Enum):
@@ -80,21 +89,77 @@ GUIDANCE_MODE_BY_TASK = {
 }
 
 
+def save_jobs():
+    """Persist all jobs to disk so they survive a restart / new client."""
+    try:
+        tmp = JOBS_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump([j.model_dump() for j in JOBS.values()], f)
+        os.replace(tmp, JOBS_FILE)
+    except Exception as e:
+        print(f"save_jobs failed: {e}")
+
+
+def load_jobs():
+    """Reload persisted jobs on startup. Jobs that were mid-flight when the
+    backend stopped can't be resumed, so mark RUNNING as failed and re-queue
+    anything still PENDING."""
+    if not os.path.exists(JOBS_FILE):
+        return []
+    requeue = []
+    try:
+        with open(JOBS_FILE) as f:
+            data = json.load(f)
+        for d in data:
+            job = Job(**d)
+            if job.status == JobStatus.RUNNING:
+                # If the output was already written, the job actually finished;
+                # otherwise it was interrupted and can't be resumed.
+                out = job.output_path
+                if not (out and os.path.exists(out)):
+                    for ext in ("png", "mp4"):
+                        cand = os.path.join(OUTPUT_DIR, f"{job.id}.{ext}")
+                        if os.path.exists(cand):
+                            out = cand
+                            break
+                if out and os.path.exists(out):
+                    job.status = JobStatus.COMPLETED
+                    job.output_path = out
+                    job.progress = 100.0
+                else:
+                    job.status = JobStatus.FAILED
+                    job.error = "interrupted by backend restart"
+            JOBS[job.id] = job
+            if job.status == JobStatus.PENDING:
+                requeue.append(job.id)
+    except Exception as e:
+        print(f"load_jobs failed: {e}")
+    return requeue
+
+
 @app.on_event("startup")
 async def startup():
-    global JOB_QUEUE, OUTPUT_DIR
+    global JOB_QUEUE, MAIN_LOOP
+    MAIN_LOOP = asyncio.get_event_loop()
     JOB_QUEUE = asyncio.Queue()
-    OUTPUT_DIR = tempfile.mkdtemp(prefix="bernini_webui_")
-    print(f"Output directory: {OUTPUT_DIR}")
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(INPUT_DIR, exist_ok=True)
+    print(f"Data directory: {DATA_DIR}")
+    for job_id in load_jobs():
+        await JOB_QUEUE.put(job_id)
     asyncio.create_task(worker_loop())
 
 
 async def broadcast(job: Job):
+    save_jobs()
     dead = []
     for cid, ws in WEBSOCKET_CONNECTIONS.items():
         try:
-            await ws.send_json(job.model_dump())
-        except:
+            # Time-box the send: a half-open client (browser tab that went away
+            # without closing the socket) must never wedge the event loop, or
+            # the running job can't complete and the whole API stalls.
+            await asyncio.wait_for(ws.send_json(job.model_dump()), timeout=5)
+        except Exception:
             dead.append(cid)
     for cid in dead:
         WEBSOCKET_CONNECTIONS.pop(cid, None)
@@ -136,12 +201,8 @@ async def worker_loop():
         job.completed_at = datetime.now().isoformat()
         CURRENT_JOB_ID = None
 
-        # Clean up uploaded assets
-        if job.video_path and os.path.exists(job.video_path):
-            os.remove(job.video_path)
-        for img_path in job.image_paths:
-            if os.path.exists(img_path):
-                os.remove(img_path)
+        # Uploaded inputs are intentionally kept so their thumbnails stay
+        # visible in the queue and the job can be restored from any client.
 
         await broadcast(job)
 
@@ -186,6 +247,17 @@ async def run_inference(job: Job) -> str:
         "system_prompt": get_system_prompt_for_task(job.task_type),
         "output_path": output_path,
     }
+
+    # Per-step progress: the pipeline runs in a worker thread, so push each
+    # update back onto the event loop to broadcast it over the websocket.
+    def on_step(step: int, total: int):
+        job.current_step = step
+        job.total_steps = total
+        job.progress = round(step / total * 100, 1) if total else 0.0
+        if MAIN_LOOP is not None:
+            asyncio.run_coroutine_threadsafe(broadcast(job), MAIN_LOOP)
+
+    kwargs["progress_callback"] = on_step
 
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(None, lambda: PIPELINE(write_output=True, **kwargs))
@@ -267,14 +339,14 @@ async def create_job(
 
     video_path = None
     if video and video.filename:
-        video_path = os.path.join(OUTPUT_DIR, f"{job_id}_video_{video.filename}")
+        video_path = os.path.join(INPUT_DIR, f"{job_id}_video_{video.filename}")
         with open(video_path, "wb") as f:
             f.write(await video.read())
 
     image_paths = []
     for i, img in enumerate(images):
         if img and img.filename:
-            p = os.path.join(OUTPUT_DIR, f"{job_id}_img{i}_{img.filename}")
+            p = os.path.join(INPUT_DIR, f"{job_id}_img{i}_{img.filename}")
             with open(p, "wb") as f:
                 f.write(await img.read())
             image_paths.append(p)
@@ -314,9 +386,25 @@ async def cancel_job(job_id: str):
 @app.get("/api/jobs/{job_id}/output")
 async def get_output(job_id: str):
     job = JOBS.get(job_id)
-    if not job or not job.output_path:
+    if not job or not job.output_path or not os.path.exists(job.output_path):
         raise HTTPException(404)
     return FileResponse(job.output_path)
+
+
+@app.get("/api/jobs/{job_id}/input/{idx}")
+async def get_input_image(job_id: str, idx: int):
+    job = JOBS.get(job_id)
+    if not job or idx >= len(job.image_paths) or not os.path.exists(job.image_paths[idx]):
+        raise HTTPException(404)
+    return FileResponse(job.image_paths[idx])
+
+
+@app.get("/api/jobs/{job_id}/video")
+async def get_input_video(job_id: str):
+    job = JOBS.get(job_id)
+    if not job or not job.video_path or not os.path.exists(job.video_path):
+        raise HTTPException(404)
+    return FileResponse(job.video_path)
 
 
 @app.websocket("/ws")

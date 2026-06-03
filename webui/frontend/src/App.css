@@ -269,6 +269,49 @@ header h1 { font-size: 24px; font-weight: 600; }
 }
 .cancel-btn:hover { border-color: #ef4444; color: #ef4444; }
 
+/* drag & drop active state */
+.upload-box.dragover {
+  border-color: #8b5cf6;
+  background: #241b3a;
+  box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.25);
+}
+.upload-box .drop-hint {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #6b7280;
+}
+
+/* randomize-seed dice button */
+.seed-row { display: flex; gap: 6px; align-items: stretch; }
+.seed-row input { flex: 1; min-width: 0; }
+.dice-btn {
+  flex: 0 0 auto;
+  width: 38px;
+  background: #1f2937;
+  border: 1px solid #374151;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+}
+.dice-btn:hover { border-color: #8b5cf6; background: #241b3a; }
+
+/* input thumbnails on job cards */
+.job-inputs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 8px 0;
+}
+.job-inputs .thumb {
+  width: 54px;
+  height: 54px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid #374151;
+  background: #000;
+}
+
 @media (max-width: 900px) {
   .main { grid-template-columns: 1fr; }
 }

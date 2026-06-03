@@ -178,6 +178,7 @@ class GEN_Wanx22(nn.Module):
         eta=1.0,
         norm_threshold=(50.0, 50.0),
         momentum=0.0,
+        progress_callback=None,
     ):
         """Run guided sampling and return the predicted VAE latent `[B,C,T,H,W]`.
 
@@ -465,5 +466,7 @@ class GEN_Wanx22(nn.Module):
                 noisy_vae_latent = self.scheduler.step(noise_pred, t, noisy_vae_latent, return_dict=False)[0]
 
             progress_bar.update(1)
+            if progress_callback is not None:
+                progress_callback(t_idx + 1, len(timesteps))
 
         return _to_spatial(noisy_vae_latent, shape)

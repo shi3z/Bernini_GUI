@@ -132,6 +132,7 @@ class BerniniRendererPipeline:
         system_prompt: str = "",
         output_path: str = "output.mp4",
         write_output: bool = True,
+        progress_callback=None,
     ):
         """Generate one clip and write it to `output_path`.
 
@@ -211,6 +212,7 @@ class BerniniRendererPipeline:
             eta=eta,
             norm_threshold=norm_threshold,
             momentum=momentum,
+            progress_callback=progress_callback,
         )
         self.model.to("cpu")
         torch.cuda.empty_cache()
