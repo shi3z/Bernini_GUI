@@ -55,6 +55,7 @@ function App() {
   const [dragVideo, setDragVideo] = useState(false)
   const [dragImage, setDragImage] = useState<number | null>(null)
   const [nowTick, setNowTick] = useState(Date.now())
+  const [inputMsg, setInputMsg] = useState('')
   const wsRef = useRef<WebSocket | null>(null)
   // Per-job step timing for a frontend-only ETA: first/last observed step+time.
   const etaRef = useRef<Map<string, { firstStep: number; firstTime: number; lastStep: number; lastTime: number }>>(new Map())
@@ -151,6 +152,35 @@ function App() {
   const removeImage = (index: number) => setImageFile(index, null)
   const removeVideo = () => setVideoFile(null)
 
+  // Use a finished job's output as the input for the next job: download it,
+  // wrap it as a File, and drop it into the matching slot (image vs video).
+  const useOutputAsInput = async (job: Job) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/jobs/${job.id}/output`)
+      const blob = await res.blob()
+      const isImg = job.task_type.includes('2i')
+      const file = new File(
+        [blob],
+        `from_${job.id}.${isImg ? 'png' : 'mp4'}`,
+        { type: blob.type || (isImg ? 'image/png' : 'video/mp4') },
+      )
+      const cur = TASK_TYPES.find(t => t.value === taskType)
+      if (isImg) {
+        setImageFile(0, file)
+        if (!cur?.needsImages) setTaskType('i2i')   // make the image usable
+        setInputMsg('🖼️ この画像を入力に設定しました')
+      } else {
+        setVideoFile(file)
+        if (!cur?.needsVideo) setTaskType('v2v')     // make the video usable
+        setInputMsg('🎬 この動画を入力に設定しました')
+      }
+      window.scrollTo({ top: 0, behavior: 'smooth' })
+      setTimeout(() => setInputMsg(''), 2500)
+    } catch (e) {
+      alert('入力への設定に失敗しました')
+    }
+  }
+
   const submitJob = async () => {
     if (!prompt.trim()) return alert('Enter a prompt')
     const formData = new FormData()
@@ -228,6 +258,7 @@ function App() {
       <div className="main">
         <div className="panel">
           <h2>New Job</h2>
+          {inputMsg && <div className="input-set-msg">{inputMsg}</div>}
           <div className="form-group">
             <label>Task Type</label>
             <select value={taskType} onChange={e => setTaskType(e.target.value)}>
@@ -364,10 +395,19 @@ function App() {
                 {job.status === 'completed' && job.output_path && (
                   <div className="output">
                     {isImg ? (
-                      <img src={`${API_BASE}/api/jobs/${job.id}/output`} alt="output" />
+                      <img
+                        src={`${API_BASE}/api/jobs/${job.id}/output`}
+                        alt="output"
+                        title="タップで現在のプロンプトの入力に設定"
+                        onClick={() => useOutputAsInput(job)}
+                        style={{ cursor: 'pointer' }}
+                      />
                     ) : (
                       <video src={`${API_BASE}/api/jobs/${job.id}/output`} controls loop />
                     )}
+                    <button className="use-input-btn" onClick={() => useOutputAsInput(job)}>
+                      {isImg ? '🖼️ この画像を入力に使う' : '🎬 この動画を入力に使う'}
+                    </button>
                   </div>
                 )}
 

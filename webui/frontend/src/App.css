@@ -260,6 +260,32 @@ header h1 { font-size: 24px; font-weight: 600; }
   background: #000;
 }
 
+.use-input-btn {
+  margin-top: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  background: #1f2937;
+  border: 1px solid #3b82f6;
+  color: #93c5fd;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition: all 0.15s;
+}
+.use-input-btn:hover { background: #1e3a8a; color: #fff; }
+
+.input-set-msg {
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  background: #064e3b;
+  border: 1px solid #10b981;
+  color: #6ee7b7;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .error { color: #ef4444; font-size: 13px; }
 
 .cancel-btn {
