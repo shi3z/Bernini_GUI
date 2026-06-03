@@ -37,11 +37,27 @@ app.add_middleware(
 
 JOBS: dict[str, "Job"] = {}
 JOB_QUEUE: asyncio.Queue = None
-PIPELINE = None
-DEVICE = None
-CURRENT_JOB_ID = None
+# One pipeline per GPU worker so several jobs run in parallel across GPUs.
+PIPELINES: dict[str, object] = {}      # device str -> loaded pipeline
+RUNNING_JOBS: dict[str, str] = {}      # device str -> job id currently running
+DEVICES: list[str] = []                # e.g. ["cuda:0", "cuda:1"]
+EXECUTOR = None                        # ThreadPoolExecutor sized to len(DEVICES)
 WEBSOCKET_CONNECTIONS: dict[str, WebSocket] = {}
 MAIN_LOOP: Optional[asyncio.AbstractEventLoop] = None
+
+
+def resolve_devices() -> list[str]:
+    """GPUs to run on. BERNINI_GPU_DEVICES="0,1,4,5" pins an explicit set;
+    otherwise use the single GPU with the most free memory."""
+    import torch
+    env = os.environ.get("BERNINI_GPU_DEVICES", "").strip()
+    if env:
+        return [f"cuda:{x.strip()}" for x in env.split(",") if x.strip() != ""]
+    n = torch.cuda.device_count()
+    if n == 0:
+        return ["cuda:0"]
+    best = max(range(n), key=lambda i: torch.cuda.mem_get_info(i)[0])
+    return [f"cuda:{best}"]
 
 # Persistent storage so jobs / inputs / outputs survive a backend restart and
 # are reachable from any client (cross-machine restore). Lives on the big
@@ -127,8 +143,12 @@ def load_jobs():
                     job.output_path = out
                     job.progress = 100.0
                 else:
-                    job.status = JobStatus.FAILED
-                    job.error = "interrupted by backend restart"
+                    # Not finished — re-queue it so a restart loses no work
+                    # (it simply re-runs from the start).
+                    job.status = JobStatus.PENDING
+                    job.progress = 0.0
+                    job.current_step = 0
+                    job.started_at = None
             JOBS[job.id] = job
             if job.status == JobStatus.PENDING:
                 requeue.append(job.id)
@@ -139,15 +159,21 @@ def load_jobs():
 
 @app.on_event("startup")
 async def startup():
-    global JOB_QUEUE, MAIN_LOOP
+    global JOB_QUEUE, MAIN_LOOP, DEVICES, EXECUTOR
+    from concurrent.futures import ThreadPoolExecutor
     MAIN_LOOP = asyncio.get_event_loop()
     JOB_QUEUE = asyncio.Queue()
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(INPUT_DIR, exist_ok=True)
+    DEVICES = resolve_devices()
+    EXECUTOR = ThreadPoolExecutor(max_workers=len(DEVICES))
     print(f"Data directory: {DATA_DIR}")
+    print(f"GPU workers: {DEVICES}")
     for job_id in load_jobs():
         await JOB_QUEUE.put(job_id)
-    asyncio.create_task(worker_loop())
+    # one worker per GPU, all pulling from the shared queue
+    for dev in DEVICES:
+        asyncio.create_task(worker_loop(dev))
 
 
 async def broadcast(job: Job):
@@ -165,28 +191,26 @@ async def broadcast(job: Job):
         WEBSOCKET_CONNECTIONS.pop(cid, None)
 
 
-async def worker_loop():
-    global PIPELINE, DEVICE, CURRENT_JOB_ID
-
+async def worker_loop(device: str):
     while True:
         job_id = await JOB_QUEUE.get()
         job = JOBS.get(job_id)
         if not job or job.status == JobStatus.CANCELLED:
             continue
 
-        CURRENT_JOB_ID = job_id
+        RUNNING_JOBS[device] = job_id
         job.status = JobStatus.RUNNING
         job.started_at = datetime.now().isoformat()
         job.total_steps = job.num_inference_steps
         await broadcast(job)
 
         try:
-            if PIPELINE is None:
-                print("Loading pipeline...")
-                await load_pipeline()
-                print("Pipeline loaded!")
+            if device not in PIPELINES:
+                print(f"[{device}] Loading pipeline...")
+                PIPELINES[device] = await load_pipeline(device)
+                print(f"[{device}] Pipeline loaded!")
 
-            output = await run_inference(job)
+            output = await run_inference(job, PIPELINES[device], device)
             job.status = JobStatus.COMPLETED
             job.output_path = output
             job.progress = 100.0
@@ -199,7 +223,7 @@ async def worker_loop():
             job.error = str(e)
 
         job.completed_at = datetime.now().isoformat()
-        CURRENT_JOB_ID = None
+        RUNNING_JOBS.pop(device, None)
 
         # Uploaded inputs are intentionally kept so their thumbnails stay
         # visible in the queue and the job can be restored from any client.
@@ -207,37 +231,40 @@ async def worker_loop():
         await broadcast(job)
 
 
-async def load_pipeline():
-    global PIPELINE, DEVICE
+async def load_pipeline(device: str):
+    # Load the (large) model off the event loop so several GPUs load in
+    # parallel and the API stays responsive during startup.
     import torch
     from bernini.pipeline import BerniniRendererPipeline
 
-    DEVICE = torch.device("cuda:0")
-    torch.cuda.set_device(DEVICE)
+    def _load():
+        dev = torch.device(device)
+        torch.cuda.set_device(dev)
+        pipeline = BerniniRendererPipeline.from_pretrained(
+            "configs/bernini_renderer_wan22",
+            high_noise_ckpt="Bernini/bernini_renderer_high",
+            low_noise_ckpt="Bernini/bernini_renderer_low",
+            device=dev,
+            load_ckpt_weights=True,
+            use_unipc=True,
+            use_src_id_rotary_emb=True,
+        )
+        # Optional torch.compile of the two DiT experts (BERNINI_COMPILE=1).
+        # ~1.3x steady-state; first job of each new frame/resolution pays a
+        # one-time (~minute) compile. FlashAttention-2 is auto-selected when
+        # installed (see bernini/attention.py).
+        if os.environ.get("BERNINI_COMPILE") == "1":
+            dd = pipeline.model.diff_dec
+            dd.transformer = torch.compile(dd.transformer)
+            dd.transformer_2 = torch.compile(dd.transformer_2)
+            from bernini.attention import get_attention_backend
+            print(f"[{device}] torch.compile enabled (attention backend: {get_attention_backend()})")
+        return pipeline
 
-    PIPELINE = BerniniRendererPipeline.from_pretrained(
-        "configs/bernini_renderer_wan22",
-        high_noise_ckpt="Bernini/bernini_renderer_high",
-        low_noise_ckpt="Bernini/bernini_renderer_low",
-        device=DEVICE,
-        load_ckpt_weights=True,
-        use_unipc=True,
-        use_src_id_rotary_emb=True,
-    )
-
-    # Optional torch.compile of the two DiT experts (BERNINI_COMPILE=1). Speeds
-    # up steady-state denoising ~1.3x; first job of each new frame/resolution
-    # pays a one-time (~minute) compile. FlashAttention-2 is picked up
-    # automatically when installed (see bernini/attention.py).
-    if os.environ.get("BERNINI_COMPILE") == "1":
-        dd = PIPELINE.model.diff_dec
-        dd.transformer = torch.compile(dd.transformer)
-        dd.transformer_2 = torch.compile(dd.transformer_2)
-        from bernini.attention import get_attention_backend
-        print(f"torch.compile enabled (attention backend: {get_attention_backend()})")
+    return await asyncio.get_event_loop().run_in_executor(EXECUTOR, _load)
 
 
-async def run_inference(job: Job) -> str:
+async def run_inference(job: Job, pipeline, device: str) -> str:
     from bernini.cli import DEFAULT_NEG_PROMPT
     from bernini.prompt_enhancer import get_system_prompt_for_task
 
@@ -270,8 +297,13 @@ async def run_inference(job: Job) -> str:
 
     kwargs["progress_callback"] = on_step
 
+    def _generate():
+        import torch
+        torch.cuda.set_device(torch.device(device))
+        return pipeline(write_output=True, **kwargs)
+
     loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, lambda: PIPELINE(write_output=True, **kwargs))
+    result = await loop.run_in_executor(EXECUTOR, _generate)
     return result or output_path
 
 
@@ -292,7 +324,13 @@ Do NOT explain what you did, just output the enhanced prompt directly."""
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "pipeline_loaded": PIPELINE is not None, "queue_size": JOB_QUEUE.qsize() if JOB_QUEUE else 0}
+    return {
+        "status": "ok",
+        "pipeline_loaded": len(PIPELINES) > 0,
+        "gpus": DEVICES,
+        "running": RUNNING_JOBS,
+        "queue_size": JOB_QUEUE.qsize() if JOB_QUEUE else 0,
+    }
 
 
 class EnhanceRequest(BaseModel):
