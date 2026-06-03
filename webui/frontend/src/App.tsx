@@ -353,11 +353,10 @@ function App() {
                   return (
                     <div className="progress">
                       <div className="progress-bar" style={{ width: `${job.progress || 0}%` }} />
-                      <span>
-                        {job.current_step}/{job.total_steps} ({(job.progress || 0).toFixed(1)}%)
-                        {' · '}
-                        {eta === null ? 'ETA 推定中…' : `残り ${formatDuration(eta)}`}
-                      </span>
+                      <div className="progress-label">
+                        <span>{job.current_step}/{job.total_steps} ({(job.progress || 0).toFixed(1)}%)</span>
+                        <span className="eta">{eta === null ? 'ETA 推定中…' : `残り ${formatDuration(eta)}`}</span>
+                      </div>
                     </div>
                   )
                 })()}
