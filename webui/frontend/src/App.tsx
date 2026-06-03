@@ -152,33 +152,33 @@ function App() {
   const removeImage = (index: number) => setImageFile(index, null)
   const removeVideo = () => setVideoFile(null)
 
-  // Use a finished job's output as the input for the next job: download it,
-  // wrap it as a File, and drop it into the matching slot (image vs video).
-  const useOutputAsInput = async (job: Job) => {
+  // Pull a media URL (a past job's reference image / source video, or an
+  // output) into the current form as the next job's input.
+  const useMediaAsInput = async (url: string, isImg: boolean, name: string) => {
     try {
-      const res = await fetch(`${API_BASE}/api/jobs/${job.id}/output`)
+      const res = await fetch(url)
       const blob = await res.blob()
-      const isImg = job.task_type.includes('2i')
-      const file = new File(
-        [blob],
-        `from_${job.id}.${isImg ? 'png' : 'mp4'}`,
-        { type: blob.type || (isImg ? 'image/png' : 'video/mp4') },
-      )
+      const file = new File([blob], name, { type: blob.type || (isImg ? 'image/png' : 'video/mp4') })
       const cur = TASK_TYPES.find(t => t.value === taskType)
       if (isImg) {
         setImageFile(0, file)
         if (!cur?.needsImages) setTaskType('i2i')   // make the image usable
-        setInputMsg('🖼️ この画像を入力に設定しました')
+        setInputMsg('🖼️ 画像を入力に設定しました')
       } else {
         setVideoFile(file)
         if (!cur?.needsVideo) setTaskType('v2v')     // make the video usable
-        setInputMsg('🎬 この動画を入力に設定しました')
+        setInputMsg('🎬 動画を入力に設定しました')
       }
       window.scrollTo({ top: 0, behavior: 'smooth' })
       setTimeout(() => setInputMsg(''), 2500)
     } catch (e) {
       alert('入力への設定に失敗しました')
     }
+  }
+
+  const useOutputAsInput = (job: Job) => {
+    const isImg = job.task_type.includes('2i')
+    useMediaAsInput(`${API_BASE}/api/jobs/${job.id}/output`, isImg, `from_${job.id}.${isImg ? 'png' : 'mp4'}`)
   }
 
   const submitJob = async () => {
@@ -367,14 +367,22 @@ function App() {
                 </div>
                 <p className="job-prompt">{job.prompt.slice(0, 120)}{job.prompt.length > 120 ? '...' : ''}</p>
 
-                {/* input thumbnails (queued reference images / source video) */}
+                {/* input thumbnails — tap to reuse as the current job's input */}
                 {(job.image_paths?.length > 0 || job.video_path) && (
                   <div className="job-inputs">
                     {job.video_path && (
-                      <video className="thumb" src={`${API_BASE}/api/jobs/${job.id}/video`} muted />
+                      <video
+                        className="thumb clickable" src={`${API_BASE}/api/jobs/${job.id}/video`} muted
+                        title="タップで現在の入力に設定（動画）"
+                        onClick={() => useMediaAsInput(`${API_BASE}/api/jobs/${job.id}/video`, false, `video_${job.id}.mp4`)}
+                      />
                     )}
                     {job.image_paths?.map((_, i) => (
-                      <img key={i} className="thumb" src={`${API_BASE}/api/jobs/${job.id}/input/${i}`} alt={`in${i}`} />
+                      <img
+                        key={i} className="thumb clickable" src={`${API_BASE}/api/jobs/${job.id}/input/${i}`} alt={`in${i}`}
+                        title="タップで現在の入力に設定（参照画像）"
+                        onClick={() => useMediaAsInput(`${API_BASE}/api/jobs/${job.id}/input/${i}`, true, `ref_${job.id}_${i}.png`)}
+                      />
                     ))}
                   </div>
                 )}
