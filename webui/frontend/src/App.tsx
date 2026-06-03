@@ -54,12 +54,17 @@ function App() {
   const [submitting, setSubmitting] = useState(false)
   const [dragVideo, setDragVideo] = useState(false)
   const [dragImage, setDragImage] = useState<number | null>(null)
+  const [nowTick, setNowTick] = useState(Date.now())
   const wsRef = useRef<WebSocket | null>(null)
+  // Per-job step timing for a frontend-only ETA: first/last observed step+time.
+  const etaRef = useRef<Map<string, { firstStep: number; firstTime: number; lastStep: number; lastTime: number }>>(new Map())
 
   useEffect(() => {
     connectWebSocket()
     fetchJobs()
-    return () => wsRef.current?.close()
+    // tick once a second so the ETA counts down live between step updates
+    const t = setInterval(() => setNowTick(Date.now()), 1000)
+    return () => { wsRef.current?.close(); clearInterval(t) }
   }, [])
 
   const connectWebSocket = () => {
@@ -67,6 +72,7 @@ function App() {
     ws.onopen = () => setConnected(true)
     ws.onmessage = (e) => {
       const job = JSON.parse(e.data) as Job
+      recordStepTiming(job)
       setJobs(prev => {
         const idx = prev.findIndex(j => j.id === job.id)
         if (idx >= 0) {
@@ -90,6 +96,41 @@ function App() {
       const data = await res.json()
       setJobs(data.jobs.reverse())
     } catch (e) { console.error(e) }
+  }
+
+  // --- frontend-only ETA: estimate from observed per-step timing ---
+  const recordStepTiming = (job: Job) => {
+    if (job.status !== 'running' || job.current_step <= 0) {
+      if (job.status !== 'running') etaRef.current.delete(job.id)
+      return
+    }
+    const now = Date.now()
+    const t = etaRef.current.get(job.id)
+    if (!t || job.current_step < t.lastStep) {
+      // first sample for this run (or step counter reset) — seed the baseline
+      etaRef.current.set(job.id, { firstStep: job.current_step, firstTime: now, lastStep: job.current_step, lastTime: now })
+    } else if (job.current_step > t.lastStep) {
+      t.lastStep = job.current_step
+      t.lastTime = now
+    }
+  }
+
+  // seconds remaining, or null if not enough samples yet
+  const computeEtaSeconds = (job: Job): number | null => {
+    if (job.status !== 'running') return null
+    const t = etaRef.current.get(job.id)
+    if (!t || t.lastStep <= t.firstStep) return null
+    const perStep = (t.lastTime - t.firstTime) / 1000 / (t.lastStep - t.firstStep)
+    const remainingSteps = Math.max(0, job.total_steps - job.current_step)
+    const elapsedSinceLast = (nowTick - t.lastTime) / 1000
+    return Math.max(0, remainingSteps * perStep - elapsedSinceLast)
+  }
+
+  const formatDuration = (s: number): string => {
+    s = Math.round(s)
+    const m = Math.floor(s / 60)
+    const sec = s % 60
+    return m > 0 ? `${m}:${sec.toString().padStart(2, '0')}` : `${sec}s`
   }
 
   const setVideoFile = (file: File | null) => {
@@ -307,12 +348,19 @@ function App() {
                   </div>
                 )}
 
-                {job.status === 'running' && (
-                  <div className="progress">
-                    <div className="progress-bar" style={{ width: `${job.progress || 0}%` }} />
-                    <span>{job.current_step}/{job.total_steps} ({(job.progress || 0).toFixed(1)}%)</span>
-                  </div>
-                )}
+                {job.status === 'running' && (() => {
+                  const eta = computeEtaSeconds(job)
+                  return (
+                    <div className="progress">
+                      <div className="progress-bar" style={{ width: `${job.progress || 0}%` }} />
+                      <span>
+                        {job.current_step}/{job.total_steps} ({(job.progress || 0).toFixed(1)}%)
+                        {' · '}
+                        {eta === null ? 'ETA 推定中…' : `残り ${formatDuration(eta)}`}
+                      </span>
+                    </div>
+                  )
+                })()}
 
                 {job.status === 'completed' && job.output_path && (
                   <div className="output">
