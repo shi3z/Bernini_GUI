@@ -42,6 +42,8 @@ PIPELINES: dict[str, object] = {}      # device str -> loaded pipeline
 RUNNING_JOBS: dict[str, str] = {}      # device str -> job id currently running
 DEVICES: list[str] = []                # e.g. ["cuda:0", "cuda:1"]
 EXECUTOR = None                        # ThreadPoolExecutor sized to len(DEVICES)
+LOAD_LOCK = threading.Lock()           # serialize model loading (accelerate's
+                                       # meta-tensor load path is not thread-safe)
 WEBSOCKET_CONNECTIONS: dict[str, WebSocket] = {}
 MAIN_LOOP: Optional[asyncio.AbstractEventLoop] = None
 
@@ -240,15 +242,18 @@ async def load_pipeline(device: str):
     def _load():
         dev = torch.device(device)
         torch.cuda.set_device(dev)
-        pipeline = BerniniRendererPipeline.from_pretrained(
-            "configs/bernini_renderer_wan22",
-            high_noise_ckpt="Bernini/bernini_renderer_high",
-            low_noise_ckpt="Bernini/bernini_renderer_low",
-            device=dev,
-            load_ckpt_weights=True,
-            use_unipc=True,
-            use_src_id_rotary_emb=True,
-        )
+        # accelerate's low_cpu_mem_usage (meta-tensor) load path races when
+        # several pipelines load at once -> serialize the actual load.
+        with LOAD_LOCK:
+            pipeline = BerniniRendererPipeline.from_pretrained(
+                "configs/bernini_renderer_wan22",
+                high_noise_ckpt="Bernini/bernini_renderer_high",
+                low_noise_ckpt="Bernini/bernini_renderer_low",
+                device=dev,
+                load_ckpt_weights=True,
+                use_unipc=True,
+                use_src_id_rotary_emb=True,
+            )
         # Optional torch.compile of the two DiT experts (BERNINI_COMPILE=1).
         # ~1.3x steady-state; first job of each new frame/resolution pays a
         # one-time (~minute) compile. FlashAttention-2 is auto-selected when
