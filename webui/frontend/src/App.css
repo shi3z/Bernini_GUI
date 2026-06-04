@@ -192,6 +192,23 @@ header h1 { font-size: 24px; font-weight: 600; }
   margin-top: 8px;
 }
 .submit-btn:hover { background: #2563eb; }
+.submit-btn:disabled, .preview-btn:disabled { opacity: 0.5; cursor: default; }
+
+.submit-row { display: flex; gap: 8px; margin-top: 8px; }
+.submit-row .submit-btn { margin-top: 0; flex: 1; }
+.preview-btn {
+  flex: 0 0 auto;
+  padding: 14px 16px;
+  background: #0f1117;
+  color: #fbbf24;
+  border: 1px solid #f59e0b;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.preview-btn:hover { background: #1a1d29; }
 
 .jobs { overflow-y: auto; max-height: calc(100vh - 140px); }
 .jobs-list { display: flex; flex-direction: column; gap: 16px; }
@@ -285,6 +302,26 @@ header h1 { font-size: 24px; font-weight: 600; }
   font-size: 13px;
   font-weight: 600;
 }
+
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.pager button {
+  padding: 6px 14px;
+  background: #1f2937;
+  border: 1px solid #374151;
+  color: #cbd5e1;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.pager button:disabled { opacity: 0.4; cursor: default; }
+.pager button:not(:disabled):hover { border-color: #3b82f6; }
+.pager span { font-size: 12px; color: #9ca3af; }
 
 .error { color: #ef4444; font-size: 13px; }
 

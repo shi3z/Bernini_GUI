@@ -28,7 +28,9 @@ const TASK_TYPES = [
   { value: 'rv2v', label: 'Reference + Video', needsVideo: true, needsImages: true, imageCount: 2 },
 ]
 
-const API_BASE = `http://${window.location.hostname}:8000`
+// Same-origin: requests go through the vite dev-server proxy to the backend.
+const API_BASE = ''
+const WS_URL = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`
 const randomSeed = () => Math.floor(Math.random() * 1000000)
 
 interface ImageSlot {
@@ -56,6 +58,8 @@ function App() {
   const [dragImage, setDragImage] = useState<number | null>(null)
   const [nowTick, setNowTick] = useState(Date.now())
   const [inputMsg, setInputMsg] = useState('')
+  const [page, setPage] = useState(0)
+  const PAGE_SIZE = 12
   const wsRef = useRef<WebSocket | null>(null)
   // Per-job step timing for a frontend-only ETA: first/last observed step+time.
   const etaRef = useRef<Map<string, { firstStep: number; firstTime: number; lastStep: number; lastTime: number }>>(new Map())
@@ -69,7 +73,7 @@ function App() {
   }, [])
 
   const connectWebSocket = () => {
-    const ws = new WebSocket(`ws://${window.location.hostname}:8000/ws`)
+    const ws = new WebSocket(WS_URL)
     ws.onopen = () => setConnected(true)
     ws.onmessage = (e) => {
       const job = JSON.parse(e.data) as Job
@@ -157,6 +161,7 @@ function App() {
   const useMediaAsInput = async (url: string, isImg: boolean, name: string) => {
     try {
       const res = await fetch(url)
+      if (!res.ok) throw new Error(`HTTP ${res.status} ${url}`)
       const blob = await res.blob()
       const file = new File([blob], name, { type: blob.type || (isImg ? 'image/png' : 'video/mp4') })
       const cur = TASK_TYPES.find(t => t.value === taskType)
@@ -172,7 +177,8 @@ function App() {
       window.scrollTo({ top: 0, behavior: 'smooth' })
       setTimeout(() => setInputMsg(''), 2500)
     } catch (e) {
-      alert('入力への設定に失敗しました')
+      console.error('useMediaAsInput failed:', e)
+      alert('入力への設定に失敗しました: ' + (e instanceof Error ? e.message : String(e)))
     }
   }
 
@@ -181,13 +187,13 @@ function App() {
     useMediaAsInput(`${API_BASE}/api/jobs/${job.id}/output`, isImg, `from_${job.id}.${isImg ? 'png' : 'mp4'}`)
   }
 
-  const submitJob = async () => {
+  const submitJob = async (overrides?: { num_frames?: number; num_inference_steps?: number }) => {
     if (!prompt.trim()) return alert('Enter a prompt')
     const formData = new FormData()
     formData.append('task_type', taskType)
     formData.append('prompt', prompt)
-    formData.append('num_frames', numFrames.toString())
-    formData.append('num_inference_steps', numSteps.toString())
+    formData.append('num_frames', String(overrides?.num_frames ?? numFrames))
+    formData.append('num_inference_steps', String(overrides?.num_inference_steps ?? numSteps))
     formData.append('seed', seed.toString())
     if (video) formData.append('video', video)
     imageSlots.forEach(slot => { if (slot.file) formData.append('images', slot.file) })
@@ -201,6 +207,9 @@ function App() {
     } catch (e) { alert('Failed to submit') }
     finally { setSubmitting(false) }
   }
+
+  // Fast preview for prompt tuning: a single frame + few steps -> seconds.
+  const submitPreview = () => submitJob({ num_frames: 1, num_inference_steps: 10 })
 
   const cancelJob = async (id: string) => {
     await fetch(`${API_BASE}/api/jobs/${id}`, { method: 'DELETE' })
@@ -348,16 +357,34 @@ function App() {
             </div>
           </div>
 
-          <button className="submit-btn" onClick={submitJob} disabled={submitting}>
-            {submitting ? 'Submitting...' : 'Submit Job'}
-          </button>
+          <div className="submit-row">
+            <button className="preview-btn" onClick={submitPreview} disabled={submitting}
+              title="1フレーム・低ステップで即生成（プロンプト調整用）">
+              ⚡ プレビュー (1フレーム)
+            </button>
+            <button className="submit-btn" onClick={() => submitJob()} disabled={submitting}>
+              {submitting ? 'Submitting...' : 'Submit Job'}
+            </button>
+          </div>
         </div>
 
         <div className="panel jobs">
           <h2>Jobs ({jobs.filter(j => j.status === 'pending').length} pending, {jobs.filter(j => j.status === 'running').length} running)</h2>
+          {(() => {
+            const totalPages = Math.max(1, Math.ceil(jobs.length / PAGE_SIZE))
+            const cur = Math.min(page, totalPages - 1)
+            return totalPages > 1 ? (
+              <div className="pager">
+                <button disabled={cur === 0} onClick={() => setPage(cur - 1)}>‹ 前へ</button>
+                <span>{cur + 1} / {totalPages}（全{jobs.length}件）</span>
+                <button disabled={cur >= totalPages - 1} onClick={() => setPage(cur + 1)}>次へ ›</button>
+              </div>
+            ) : null
+          })()}
           <div className="jobs-list">
-            {jobs.map(job => {
-              const isImg = job.task_type.includes('2i')
+            {jobs.slice(Math.min(page, Math.max(0, Math.ceil(jobs.length / PAGE_SIZE) - 1)) * PAGE_SIZE,
+                       (Math.min(page, Math.max(0, Math.ceil(jobs.length / PAGE_SIZE) - 1)) + 1) * PAGE_SIZE).map(job => {
+              const isImg = job.task_type.includes('2i') || job.num_frames === 1
               return (
               <div key={job.id} className={`job-card ${job.status}`}>
                 <div className="job-header">
@@ -420,7 +447,9 @@ function App() {
                 )}
 
                 {job.status === 'failed' && <p className="error">{job.error}</p>}
-                {job.status === 'pending' && <button className="cancel-btn" onClick={() => cancelJob(job.id)}>Cancel</button>}
+                {(job.status === 'pending' || job.status === 'running') && (
+                  <button className="cancel-btn" onClick={() => cancelJob(job.id)}>Cancel</button>
+                )}
               </div>
             )})}
           </div>

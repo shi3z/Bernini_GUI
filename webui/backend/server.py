@@ -46,6 +46,11 @@ LOAD_LOCK = threading.Lock()           # serialize model loading (accelerate's
                                        # meta-tensor load path is not thread-safe)
 WEBSOCKET_CONNECTIONS: dict[str, WebSocket] = {}
 MAIN_LOOP: Optional[asyncio.AbstractEventLoop] = None
+CANCEL_REQUESTED: set = set()          # job ids to abort at the next step
+
+
+class _JobCancelled(Exception):
+    """Raised from the step callback to abort a running generation."""
 
 
 def resolve_devices() -> list[str]:
@@ -218,11 +223,18 @@ async def worker_loop(device: str):
             job.progress = 100.0
             job.current_step = job.total_steps
 
+        except _JobCancelled:
+            job.status = JobStatus.CANCELLED
+            CANCEL_REQUESTED.discard(job.id)
         except Exception as e:
-            import traceback
-            traceback.print_exc()
-            job.status = JobStatus.FAILED
-            job.error = str(e)
+            if job.id in CANCEL_REQUESTED:
+                job.status = JobStatus.CANCELLED
+                CANCEL_REQUESTED.discard(job.id)
+            else:
+                import traceback
+                traceback.print_exc()
+                job.status = JobStatus.FAILED
+                job.error = str(e)
 
         job.completed_at = datetime.now().isoformat()
         RUNNING_JOBS.pop(device, None)
@@ -273,7 +285,9 @@ async def run_inference(job: Job, pipeline, device: str) -> str:
     from bernini.cli import DEFAULT_NEG_PROMPT
     from bernini.prompt_enhancer import get_system_prompt_for_task
 
-    ext = "png" if job.task_type in ["t2i", "i2i"] else "mp4"
+    # A single frame is a still image (fast preview for prompt tuning) -> PNG.
+    single_frame = job.task_type in ["t2i", "i2i"] or job.num_frames == 1
+    ext = "png" if single_frame else "mp4"
     output_path = os.path.join(OUTPUT_DIR, f"{job.id}.{ext}")
     guidance_mode = job.guidance_mode or GUIDANCE_MODE_BY_TASK.get(job.task_type, "t2v_apg")
 
@@ -284,7 +298,7 @@ async def run_inference(job: Job, pipeline, device: str) -> str:
         "image": job.image_paths[0] if job.image_paths and job.task_type == "i2i" else None,
         "images": job.image_paths if job.image_paths and job.task_type in ["r2v", "rv2v", "ads2v"] else None,
         "num_inference_steps": job.num_inference_steps,
-        "num_frames": 1 if job.task_type in ["t2i", "i2i"] else job.num_frames,
+        "num_frames": 1 if single_frame else job.num_frames,
         "seed": job.seed,
         "guidance_mode": guidance_mode,
         "system_prompt": get_system_prompt_for_task(job.task_type),
@@ -294,6 +308,8 @@ async def run_inference(job: Job, pipeline, device: str) -> str:
     # Per-step progress: the pipeline runs in a worker thread, so push each
     # update back onto the event loop to broadcast it over the websocket.
     def on_step(step: int, total: int):
+        if job.id in CANCEL_REQUESTED:
+            raise _JobCancelled()
         job.current_step = step
         job.total_steps = total
         job.progress = round(step / total * 100, 1) if total else 0.0
@@ -431,7 +447,10 @@ async def cancel_job(job_id: str):
     if not job:
         raise HTTPException(404)
     if job.status == JobStatus.RUNNING:
-        raise HTTPException(400, "Cannot cancel running job")
+        # signal the running generation to abort at the next step boundary
+        CANCEL_REQUESTED.add(job_id)
+    elif job.status in (JobStatus.COMPLETED, JobStatus.FAILED):
+        raise HTTPException(400, f"Cannot cancel a {job.status.value} job")
     job.status = JobStatus.CANCELLED
     await broadcast(job)
     return {"status": "cancelled"}
